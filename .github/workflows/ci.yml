@@ -14,4 +14,4 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt pytest
       - name: Run tests
-        run: pytest test_dice_ai.py
+        run: pytest tests/
