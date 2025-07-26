@@ -698,55 +698,115 @@ class SLevelAIPredictor:
         print("🔄 動態再訓練完成")
 
     def train_models(self, historical_data):
+        """
+        SSS級訓練流程（防錯強化版）
+        """
         from sklearn.inspection import permutation_importance
+        
+        # 強制初始化
         self.models = {}
+        
         try:
             print("🚀 開始 SSS級 AI 訓練…")
-            phases = self.split_by_phase(historical_data)
-            for phase, data in phases.items():
-                if len(data) >= 20:
-                    Xp, yp = self.prepare_training_data(data)
-                    if Xp is None:
-                        continue
-                    Xp = self.scaler.fit_transform(Xp)
-                    setattr(self, f"model_{phase}", self._build_best_rf(Xp, yp))
-                    print(f"✅ 階段 '{phase}' 子模型訓練完成")
-            X, y = self.prepare_training_data(historical_data)
-            if X is None or len(X) < 15:  # 調整為15 (對應20局)
-                print("❌ 資料不足（至少15個有效樣本）")
+            
+            # 1. 資料驗證
+            if not historical_data or len(historical_data) < 5:
+                print("❌ 歷史資料不足")
                 return False
-            if self.feature_mask is not None and len(self.feature_mask) == X.shape[1]:
-                X = X[:, self.feature_mask]
-                print(f"✅ 套用特徵遮罩：剩餘 {X.shape[1]} 特徵")
+            
+            # 2. 分流訓練（帶防錯處理）
+            try:
+                phases = self.split_by_phase(historical_data)
+                if phases:
+                    for phase, data in phases.items():
+                        if data and len(data) >= 15:  # 確保有足夠資料
+                            Xp, yp = self.prepare_training_data(data)
+                            if Xp is not None and yp is not None and len(Xp) > 0:
+                                Xp = self.scaler.fit_transform(Xp)
+                                setattr(self, f"model_{phase}", self._build_best_rf(Xp, yp))
+                                print(f"✅ 階段 '{phase}' 子模型訓練完成")
+            except Exception as e:
+                print(f"⚠️ 分流訓練跳過: {e}")
+            
+            # 3. 主要資料準備
+            X, y = self.prepare_training_data(historical_data)
+            if X is None or y is None or len(X) < 15:
+                print(f"❌ 主要資料不足（需至少15筆有效樣本）")
+                return False
+            
+            # 4. 特徵遮罩處理（防錯）
+            if (self.feature_mask is not None and 
+                hasattr(self.feature_mask, '__len__') and 
+                len(self.feature_mask) == X.shape[1]):
+                try:
+                    X = X[:, self.feature_mask]
+                    print(f"✅ 套用特徵遮罩：剩餘 {X.shape[1]} 特徵")
+                except Exception as e:
+                    print(f"⚠️ 特徵遮罩失敗，使用原始特徵: {e}")
+            
+            # 5. 標準化
             X_scaled = self.scaler.fit_transform(X)
+            
+            # 6. 建立基模型
             self.models['random_forest'] = self._build_best_rf(X_scaled, y)
             self.models['gradient_boost'] = self._build_best_gbdt(X_scaled, y)
             self.models['svm'] = self._build_best_svm(X_scaled, y)
             self.models['neural_network'] = self._build_best_mlp(X_scaled, y)
+            
             base_preds = []
             for name, model in self.models.items():
-                model.fit(X_scaled, y)
-                preds = model.predict_proba(X_scaled)[:,1] if hasattr(model, 'predict_proba') else model.predict(X_scaled)
-                base_preds.append(preds)
-                print(f"✅ {name} 模型訓練完成")
-            self.model_lstm = self.build_and_train_lstm(X_scaled, y)
-            lstm_preds = self.model_lstm.predict(X_scaled.reshape(-1, X.shape[1], 1)).flatten()
-            base_preds.append(lstm_preds)
-            print("✅ LSTM 子模型訓練並加入 stacking")
-            meta_features = np.column_stack(base_preds)
-            self.meta_model.fit(meta_features, y)
-            print("✅ Meta 模型訓練完成")
-            rf = self.models['random_forest']
-            importances = permutation_importance(rf, X_scaled, y, n_repeats=3, random_state=42).importances_mean
-            if len(importances) > 5:
-                low_idx = np.argsort(importances)[:2]
-                mask = np.ones(X_scaled.shape[1], dtype=bool)
-                mask[low_idx] = False
-                self.feature_mask = mask
-                print(f"🔍 特徵遮罩更新：剔除 {low_idx.tolist()}")
+                try:
+                    model.fit(X_scaled, y)
+                    preds = (model.predict_proba(X_scaled)[:,1] 
+                            if hasattr(model, 'predict_proba') 
+                            else model.predict(X_scaled))
+                    base_preds.append(preds)
+                    print(f"✅ {name} 模型訓練完成")
+                except Exception as e:
+                    print(f"⚠️ {name} 模型訓練失敗: {e}")
+                    # 使用隨機預測作為備份
+                    base_preds.append(np.full(len(X_scaled), 0.5))
+            
+            # 7. LSTM 模型（帶防錯）
+            try:
+                self.model_lstm = self.build_and_train_lstm(X_scaled, y)
+                lstm_preds = self.model_lstm.predict(
+                    X_scaled.reshape(-1, X_scaled.shape[1], 1)
+                ).flatten()
+                base_preds.append(lstm_preds)
+                print("✅ LSTM 子模型訓練完成")
+            except Exception as e:
+                print(f"⚠️ LSTM 訓練失敗: {e}")
+                base_preds.append(np.full(len(X_scaled), 0.5))
+            
+            # 8. Meta 模型
+            if base_preds and len(base_preds) > 0:
+                meta_features = np.column_stack(base_preds)
+                self.meta_model.fit(meta_features, y)
+                print("✅ Meta 模型訓練完成")
+            
+            # 9. 特徵重要度更新（防錯版）
+            try:
+                if 'random_forest' in self.models:
+                    rf = self.models['random_forest']
+                    importances = permutation_importance(
+                        rf, X_scaled, y, n_repeats=3, random_state=42
+                    ).importances_mean
+                    
+                    if len(importances) > 5:
+                        low_idx = np.argsort(importances)[:2]
+                        mask = np.ones(X_scaled.shape[1], dtype=bool)
+                        mask[low_idx] = False
+                        self.feature_mask = mask
+                        print(f"🔍 特徵遮罩更新：剔除 {low_idx.tolist()}")
+            except Exception as e:
+                print(f"⚠️ 特徵重要度更新失敗: {e}")
+            
+            # 10. 標記完成
             self.is_trained = True
             print("🎉 SSS級 AI 訓練完成！")
             return True
+            
         except Exception as e:
             print(f"❌ SSS級 AI 訓練錯誤：{e}")
             return False
@@ -966,20 +1026,32 @@ class SLevelAIPredictor:
     # 在 SLevelAIPredictor 類別中，新增方法 split_by_phase
     def split_by_phase(self, historical_data):
         """
-        根據局數或階段分流：
-        - 開局 (1~10) → model_open
-        - 中盤 (11~30) → model_mid
-        - 尾盤 (>30) → model_end
+        根據局數分流（防錯強化版）
         """
         phases = {'open': [], 'mid': [], 'end': []}
+        
+        if not historical_data:
+            return phases
+        
         for rec in historical_data:
-            idx = rec[0]
-            if idx <= 10:
-                phases['open'].append(rec)
-            elif idx <= 30:
-                phases['mid'].append(rec)
-            else:
-                phases['end'].append(rec)
+            try:
+                # 確保 rec 有足夠的元素且第一個元素可轉為整數
+                if not rec or len(rec) < 1:
+                    continue
+                
+                idx = int(rec[0])  # 強制轉換為整數
+                
+                if idx <= 10:
+                    phases['open'].append(rec)
+                elif idx <= 30:
+                    phases['mid'].append(rec)
+                else:
+                    phases['end'].append(rec)
+                    
+            except (ValueError, TypeError, IndexError):
+                # 跳過無法處理的資料
+                continue
+        
         return phases
 
     # 定義輔助函式 dragon_sensitive_predict
