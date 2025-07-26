@@ -4,7 +4,7 @@ from game_of_dice_super_ai_sss import SLevelAIPredictor  # 替換為您的檔案
 
 def test_train_models():
     ai = SLevelAIPredictor()
-    historical_data = [("1", 8, "小")] * 25  # 模擬25局數據
+    historical_data = [(i+1, 8, "小") for i in range(25)]  # 模擬25局數據
     assert ai.train_models(historical_data) is True  # 測試訓練成功
 
 def test_predict_with_confidence():

@@ -663,15 +663,6 @@ class SLevelAIPredictor:
         import torch.nn as nn
         import torch.optim as optim
         # 簡易 DQN 網絡
-        class DQNAgent(nn.Module):
-            def __init__(self, dim):
-                super().__init__()
-                self.net = nn.Sequential(
-                    nn.Linear(dim,64), nn.ReLU(),
-                    nn.Linear(64,64), nn.ReLU(),
-                    nn.Linear(64,2)
-                )
-            def forward(self, x): return self.net(x)
         agent = DQNAgent(X.shape[1])
         opt = optim.Adam(agent.parameters(), lr=1e-3)
         loss_fn = nn.MSELoss()
